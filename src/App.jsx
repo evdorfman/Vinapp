@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Plus, Search, X, ChevronRight, Trash2, Pencil, ArrowLeft, Image as ImageIcon, LayoutGrid, List as ListIcon, MessageCircle, Send, Camera, RefreshCw, TrendingUp, Bot, Sparkles, ExternalLink } from 'lucide-react';
-import { ANTHROPIC_ENDPOINT, MODEL } from './lib/api.js';
+import { capabilities, complete, parseJson, runAgent } from './lib/api.js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from 'recharts';
 
 const STATUS = ['In inventory (no listing info)', 'In inventory (ready to list)', 'Listed', 'Sold - not shipped', 'Shipped', 'Delivered', 'Complete', 'Cancelled / Delisted'];
@@ -169,24 +169,16 @@ function formatTimestamp(iso) {
 
 async function fetchLiveComp(card) {
   const query = [card.name, card.setName, card.cardNumber, card.condition, card.graded ? `${card.gradingCompany} ${card.grade}` : ''].filter(Boolean).join(' ');
-  const response = await fetch(ANTHROPIC_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 800,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: `Search eBay for recent sold or completed listings matching this trading card: "${query}". Estimate the current average selling price in USD based on comparable recent sales. After your research, respond with ONLY a single final line in exactly this format and nothing after it:\nRESULT: {"average": <number>, "note": "<one short sentence>"}`,
-      }],
-    }),
+  const { supportsWebSearch } = await capabilities();
+  const instruction = supportsWebSearch
+    ? `Search eBay for recent sold or completed listings matching this trading card: "${query}". Estimate the current average selling price in USD based on comparable recent sales. After your research, respond with ONLY a single final line in exactly this format and nothing after it:\nRESULT: {"average": <number>, "note": "<one short sentence>"}`
+    : `Estimate the current average selling price in USD for this trading card, from what you know of the market: "${query}". You cannot search the web here, so say so in the note and keep the estimate honest — a rough figure, not a quote. Respond with ONLY a single line in exactly this format and nothing after it:\nRESULT: {"average": <number>, "note": "<one short sentence, mentioning that this is an estimate without live sales data>"}`;
+  const { text } = await complete({
+    messages: [{ role: 'user', content: instruction }],
+    maxTokens: 800,
+    webSearch: supportsWebSearch,
   });
-  const data = await response.json();
-  const text = (data.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('\n');
-  const match = text.match(/RESULT:\s*(\{.*\})/s);
-  if (!match) throw new Error('No result found');
-  const parsed = JSON.parse(match[1]);
+  const parsed = parseJson(text);
   if (typeof parsed.average !== 'number') throw new Error('Invalid result');
   return parsed;
 }
@@ -196,45 +188,32 @@ async function generateListingCopy(card) {
     card.name, card.setName, card.cardNumber, card.rarity, card.language, card.manufacturingInfo,
     card.condition, card.graded ? `${card.gradingCompany} ${card.grade} graded` : '',
   ].filter(Boolean).join(', ');
-  const response = await fetch(ANTHROPIC_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 500,
-      messages: [{
-        role: 'user',
-        content: `Write an eBay listing for this trading card: ${details}. Return ONLY a raw JSON object, no markdown fences, no explanation, with exactly two keys: "title" (under 80 characters, eBay-style, front-loaded with the details buyers search for) and "description" (3-5 short honest sentences about the card and its condition, no fluff or hype).`,
-      }],
-    }),
+  const { text } = await complete({
+    messages: [{
+      role: 'user',
+      content: `Write an eBay listing for this trading card: ${details}. Return ONLY a raw JSON object, no markdown fences, no explanation, with exactly two keys: "title" (under 80 characters, eBay-style, front-loaded with the details buyers search for) and "description" (3-5 short honest sentences about the card and its condition, no fluff or hype).`,
+    }],
+    maxTokens: 500,
   });
-  const data = await response.json();
-  const text = (data.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('').trim();
-  const clean = text.replace(/^```json/i, '').replace(/```$/, '').trim();
-  const parsed = JSON.parse(clean);
+  const parsed = parseJson(text);
   if (!parsed.title || !parsed.description) throw new Error('Invalid listing result');
   return parsed;
 }
 
 async function fetchSetChecklist(setName, total, cardType) {
-  const response = await fetch(ANTHROPIC_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 8000,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: `Research the full checklist for the "${setName}" ${cardType || 'trading card'} set, which has ${total} cards numbered 1 through ${total}. For each number, find the card's name and an approximate current market price in USD (raw/ungraded, near-mint). After your research, respond with ONLY a final line in exactly this format and nothing else after it:\nRESULT: [{"num":1,"name":"...","price":12.5},{"num":2,"name":"...","price":null}]\nInclude one entry per number from 1 to ${total}. Use null for price if you can't find a reliable one. Keep names short.`,
-      }],
-    }),
+  const { supportsWebSearch } = await capabilities();
+  const research = supportsWebSearch
+    ? `Research the full checklist for the "${setName}" ${cardType || 'trading card'} set`
+    : `From what you know, write out the checklist for the "${setName}" ${cardType || 'trading card'} set`;
+  const { text } = await complete({
+    messages: [{
+      role: 'user',
+      content: `${research}, which has ${total} cards numbered 1 through ${total}. For each number, give the card's name and an approximate current market price in USD (raw/ungraded, near-mint). Respond with ONLY a final line in exactly this format and nothing else after it:\nRESULT: [{"num":1,"name":"...","price":12.5},{"num":2,"name":"...","price":null}]\nInclude one entry per number from 1 to ${total}. Use null for the price, or for a name you are unsure of, rather than inventing one. Keep names short.`,
+    }],
+    maxTokens: 8000,
+    webSearch: supportsWebSearch,
   });
-  const data = await response.json();
-  const text = (data.content || []).map((b) => (b.type === 'text' ? b.text : '')).join('\n');
-  const match = text.match(/RESULT:\s*(\[.*\])/s);
-  if (!match) throw new Error('No checklist result found');
-  const parsed = JSON.parse(match[1]);
+  const parsed = parseJson(text, 'array');
   if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Invalid checklist result');
   return parsed;
 }
@@ -342,27 +321,26 @@ function fileToResizedDataUrl(file, maxDim = 900, quality = 0.75) {
 }
 
 async function extractCardInfo(dataUrl) {
-  const mediaType = dataUrl.substring(5, dataUrl.indexOf(';'));
-  const base64 = dataUrl.split(',')[1];
-  const response = await fetch(ANTHROPIC_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: MODEL,
-      max_tokens: 500,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-          { type: 'text', text: 'Identify this trading card from the photo. Return ONLY a raw JSON object, no markdown fences, no explanation, with exactly these keys: name, cardType, setName, cardNumber, rarity, language, manufacturingInfo. Use an empty string for any field you cannot determine with confidence. Do not guess condition or grading - leave those out entirely.' },
-        ],
-      }],
-    }),
+  const { text } = await complete({
+    messages: [{
+      role: 'user',
+      content: 'Identify this trading card from the photo. Return ONLY a raw JSON object, no markdown fences, no explanation, with exactly these keys: name, cardType, setName, cardNumber, rarity, language, manufacturingInfo. Use an empty string for any field you cannot determine with confidence. Do not guess condition or grading - leave those out entirely.',
+    }],
+    images: [dataUrl],
+    maxTokens: 500,
   });
-  const data = await response.json();
-  const text = (data.content || []).map((b) => b.text || '').join('').trim();
-  const clean = text.replace(/^```json/i, '').replace(/```$/, '').trim();
-  return JSON.parse(clean);
+  return parseJson(text);
+}
+
+/** What the assistant backend can do this session; null until resolved. */
+function useAssistant() {
+  const [caps, setCaps] = useState(null);
+  useEffect(() => {
+    let active = true;
+    capabilities().then((c) => { if (active) setCaps(c); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+  return caps;
 }
 
 function Field({ label, children }) {
@@ -735,6 +713,10 @@ function AddModeScreen({ onSingle, onBulk, onCancel }) {
 }
 
 function AddChoiceScreen({ onManual, onScan, onCancel }) {
+  const assistant = useAssistant();
+  // Photo scanning needs an assistant that accepts images; hide it once we
+  // know this one does not, rather than offering a button that always fails.
+  const canScan = !assistant || assistant.supportsImages;
   return (
     <div className="min-h-screen bg-stone-50 font-sans overflow-x-hidden">
       <div className="max-w-2xl mx-auto px-4 pb-24">
@@ -744,6 +726,7 @@ function AddChoiceScreen({ onManual, onScan, onCancel }) {
         <h1 className="text-xl font-semibold text-stone-900 mb-1">Add a card</h1>
         <p className="text-sm text-stone-500 mb-6">How do you want to enter this card?</p>
         <div className="space-y-3">
+          {canScan && (
           <button onClick={onScan} className="w-full flex items-center gap-3 bg-white rounded-lg border border-stone-200 px-4 py-4 text-left active:bg-stone-50">
             <div className="w-10 h-10 rounded-md bg-amber-100 flex items-center justify-center shrink-0"><Camera size={18} className="text-amber-700" /></div>
             <div>
@@ -751,6 +734,7 @@ function AddChoiceScreen({ onManual, onScan, onCancel }) {
               <p className="text-xs text-stone-500">Upload a photo and let the assistant fill in the details</p>
             </div>
           </button>
+          )}
           <button onClick={onManual} className="w-full flex items-center gap-3 bg-white rounded-lg border border-stone-200 px-4 py-4 text-left active:bg-stone-50">
             <div className="w-10 h-10 rounded-md bg-stone-100 flex items-center justify-center shrink-0"><Pencil size={18} className="text-stone-700" /></div>
             <div>
@@ -1966,27 +1950,27 @@ const AGENT_TOOLS = [
   {
     name: 'search_cards',
     description: 'Search the inventory for cards matching a name, set, card number, inventory number, or status. Returns up to 15 matches with their id, name, set, status, and prices. Always use this first to find a card\'s id before calling any other tool.',
-    input_schema: { type: 'object', properties: { query: { type: 'string', description: 'Search text, e.g. a card name, set name, or status' } }, required: ['query'] },
+    inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Search text, e.g. a card name, set name, or status' } }, required: ['query'] },
   },
   {
     name: 'advance_status',
     description: 'Move a card forward one step in its lifecycle: In inventory -> Listed -> Sold - not shipped -> Shipped -> Delivered -> Complete. Use this for requests like "list my Charizard" or "mark the Blastoise as shipped".',
-    input_schema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
+    inputSchema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
   },
   {
     name: 'set_status',
     description: 'Set a card status directly to any value, including "Cancelled / Delisted". Use this only when advance_status would not reach the target status directly (e.g. delisting, or moving backward).',
-    input_schema: { type: 'object', properties: { card_id: { type: 'string' }, status: { type: 'string', enum: STATUS } }, required: ['card_id', 'status'] },
+    inputSchema: { type: 'object', properties: { card_id: { type: 'string' }, status: { type: 'string', enum: STATUS } }, required: ['card_id', 'status'] },
   },
   {
     name: 'set_price',
     description: "Update a card's buy-it-now price.",
-    input_schema: { type: 'object', properties: { card_id: { type: 'string' }, price: { type: 'number' } }, required: ['card_id', 'price'] },
+    inputSchema: { type: 'object', properties: { card_id: { type: 'string' }, price: { type: 'number' } }, required: ['card_id', 'price'] },
   },
   {
     name: 'generate_listing',
     description: "Write an eBay listing title and description for a card and save it to that card. Use this when asked to draft, write, or generate listing copy.",
-    input_schema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
+    inputSchema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
   },
 ];
 
@@ -2071,45 +2055,27 @@ function ChatPanel({ cards, stats, sets, onCardsChange }) {
     setMessages(nextMessages);
     setLoading(true);
 
+    // The tools below mutate `working` as the agent goes; it is committed once
+    // the run finishes.
     let working = cards.map((c) => ({ ...c }));
-    let convo = nextMessages.map((m) => ({ role: m.role, content: m.content }));
+    const runTool = (name) => async (input) => {
+      const outcome = await executeTool(name, input, working);
+      working = outcome.working;
+      return outcome.result;
+    };
 
     try {
-      for (let step = 0; step < 6; step++) {
-        const response = await fetch(ANTHROPIC_ENDPOINT, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            model: MODEL,
-            max_tokens: 1200,
-            system: `You are an operations agent for a collectibles resale business (Pokemon cards, comics, toys) that sells on eBay. You can both answer questions and take actions using the tools provided — moving cards through their lifecycle, updating prices, and generating listing copy. Always search_cards first to find the correct card id before acting on it, and if a search returns multiple plausible matches, ask the person which one they mean rather than guessing. Confirm what you did in plain language at the end. Be concise. Format currency clearly.\n\nInventory summary (JSON):\n${JSON.stringify(buildContext(working))}`,
-            tools: AGENT_TOOLS,
-            messages: convo,
-          }),
-        });
-        const data = await response.json();
-        const content = data.content || [];
-        const toolUses = content.filter((b) => b.type === 'tool_use');
-        const textBlocks = content.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+      const { text, outOfSteps } = await runAgent({
+        system: `You are an operations agent for a collectibles resale business (Pokemon cards, comics, toys) that sells on eBay. You can both answer questions and take actions using the tools provided — moving cards through their lifecycle, updating prices, and generating listing copy. Always search_cards first to find the correct card id before acting on it, and if a search returns multiple plausible matches, ask the person which one they mean rather than guessing. Confirm what you did in plain language at the end. Be concise. Format currency clearly.\n\nInventory summary (JSON):\n${JSON.stringify(buildContext(working))}`,
+        messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+        tools: AGENT_TOOLS.map((t) => ({ ...t, execute: runTool(t.name) })),
+        maxSteps: 6,
+      });
 
-        if (toolUses.length === 0) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: textBlocks || "I couldn't find an answer to that." }]);
-          break;
-        }
-
-        convo.push({ role: 'assistant', content });
-        const toolResults = [];
-        for (const tu of toolUses) {
-          const outcome = await executeTool(tu.name, tu.input, working);
-          working = outcome.working;
-          toolResults.push({ type: 'tool_result', tool_use_id: tu.id, content: outcome.result });
-        }
-        convo.push({ role: 'user', content: toolResults });
-
-        if (step === 5) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: "I made some updates but stopped after a few steps — let me know if you'd like me to keep going." }]);
-        }
-      }
+      const reply = outOfSteps
+        ? "I made some updates but stopped after a few steps — let me know if you'd like me to keep going."
+        : text || "I couldn't find an answer to that.";
+      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
       onCardsChange(working);
     } catch (e) {
       setErr('Something went wrong reaching the assistant. Try again.');
