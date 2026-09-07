@@ -10,7 +10,8 @@
     "build:artifact": "npm run build && node scripts/build-artifact.mjs",
     "preview": "vite preview",
     "start": "node server/index.js",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.469.0",

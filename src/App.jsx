@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Search, X, ChevronRight, Trash2, Pencil, ArrowLeft, Image as ImageIcon, LayoutGrid, List as ListIcon, MessageCircle, Send, Camera, RefreshCw, TrendingUp, Bot, Sparkles, ExternalLink } from 'lucide-react';
-import { capabilities, complete, parseJson, runAgent } from './lib/api.js';
+import { Plus, Search, X, ChevronRight, Trash2, Pencil, ArrowLeft, Image as ImageIcon, LayoutGrid, List as ListIcon, Camera, RefreshCw, TrendingUp, Sparkles, ExternalLink } from 'lucide-react';
+import { capabilities, complete, parseJson } from './lib/api.js';
+import { catalogFields, findByNumber, marketPrice, parseNumber, priceForCard } from './lib/cardLookup.js';
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from 'recharts';
 
 const STATUS = ['In inventory (no listing info)', 'In inventory (ready to list)', 'Listed', 'Sold - not shipped', 'Shipped', 'Delivered', 'Complete', 'Cancelled / Delisted'];
@@ -86,6 +87,7 @@ const emptyCard = () => ({
   cardType: '',
   name: '',
   cardNumber: '',
+  catalogId: '',
   setName: '',
   rarity: '',
   language: '',
@@ -168,6 +170,15 @@ function formatTimestamp(iso) {
 }
 
 async function fetchLiveComp(card) {
+  // The catalog is free, exact and current — try it before asking the model to
+  // estimate. It only answers for cards it can identify unambiguously.
+  try {
+    const catalogPrice = await priceForCard(card);
+    if (catalogPrice) return catalogPrice;
+  } catch (e) {
+    // catalog unreachable (offline, or an artifact's CSP) — fall back below
+  }
+
   const query = [card.name, card.setName, card.cardNumber, card.condition, card.graded ? `${card.gradingCompany} ${card.grade}` : ''].filter(Boolean).join(' ');
   const { supportsWebSearch } = await capabilities();
   const instruction = supportsWebSearch
@@ -637,9 +648,6 @@ export default function App() {
           <button onClick={() => setView('sets')} className={`flex items-center gap-1.5 h-9 px-3 rounded-md text-sm font-medium border ${view === 'sets' ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`}>
             <LayoutGrid size={14} /> By set
           </button>
-          <button onClick={() => setView('ask')} className={`flex items-center gap-1.5 h-9 px-3 rounded-md text-sm font-medium border ${view === 'ask' ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-300'}`}>
-            <Bot size={14} /> Agent
-          </button>
         </div>
 
         {view === 'inventory' && (
@@ -683,7 +691,6 @@ export default function App() {
           )
         )}
 
-        {view === 'ask' && <ChatPanel cards={cards} stats={stats} sets={sets} onCardsChange={setCards} />}
       </div>
     </div>
   );
@@ -1332,6 +1339,8 @@ function DetailView({ card, onBack, onEdit, onDelete, onUpdate, onAdvance }) {
         comparablePrice: String(newAvg),
         lastPriceCheck: now,
         compHistory: [...(card.compHistory || []), { date: now, price: newAvg }],
+        // Remember which catalog entry this is, so the next check is a direct hit.
+        ...(result.catalogId ? { catalogId: result.catalogId } : {}),
       };
       const currentPrice = num(card.buyItNowPrice);
       if (currentPrice > 0) {
@@ -1661,6 +1670,9 @@ function EditForm({ card, isNew, initialPhotoFront, existingCards, onCancel, onS
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
   const [duplicateWarning, setDuplicateWarning] = useState(null);
+  const [lookingUp, setLookingUp] = useState(false);
+  const [lookupHits, setLookupHits] = useState(null);
+  const [lookupNote, setLookupNote] = useState('');
 
   const [photoFrontPreview, setPhotoFrontPreview] = useState(initialPhotoFront || null);
   const [photoFrontPending, setPhotoFrontPending] = useState(initialPhotoFront || null);
@@ -1738,6 +1750,32 @@ function EditForm({ card, isNew, initialPhotoFront, existingCards, onCancel, onS
     proceedSave();
   }
 
+  async function runLookup() {
+    const parsed = parseNumber(form.cardNumber);
+    setLookupHits(null);
+    setLookupNote('');
+    if (!parsed || !parsed.printedTotal) {
+      setLookupNote('Enter the number as it is printed on the card, like 4/102.');
+      return;
+    }
+    setLookingUp(true);
+    try {
+      const hits = await findByNumber(parsed.number, parsed.printedTotal);
+      if (!hits.length) setLookupNote(`Nothing in the catalog numbered ${parsed.number}/${parsed.printedTotal}.`);
+      else if (hits.length === 1) applyCatalog(hits[0]);
+      else setLookupHits(hits);
+    } catch (e) {
+      setLookupNote('Could not reach the card catalog.');
+    }
+    setLookingUp(false);
+  }
+
+  function applyCatalog(catalogCard) {
+    setForm((f) => ({ ...f, ...catalogFields(catalogCard) }));
+    setLookupHits(null);
+    setLookupNote(`Filled from the catalog: ${catalogCard.name}, ${(catalogCard.set || {}).name}.`);
+  }
+
   return (
     <div className="min-h-screen bg-stone-50 font-sans overflow-x-hidden">
       <div className="max-w-2xl mx-auto px-4 pb-28">
@@ -1791,6 +1829,29 @@ function EditForm({ card, isNew, initialPhotoFront, existingCards, onCancel, onS
           <Field label="Rarity"><input className={inputCls} value={form.rarity} onChange={set('rarity')} placeholder="Holo rare" /></Field>
           <Field label="Language"><input className={inputCls} value={form.language} onChange={set('language')} placeholder="English" /></Field>
           <Field label="Manufacturing info"><input className={inputCls} value={form.manufacturingInfo} onChange={set('manufacturingInfo')} placeholder="1st edition" /></Field>
+          <div className="col-span-2">
+            <button type="button" onClick={runLookup} disabled={lookingUp} className="w-full h-9 flex items-center justify-center gap-1.5 rounded-md border border-stone-300 bg-white text-sm font-medium text-stone-700 active:bg-stone-50 disabled:opacity-50">
+              <Search size={14} /> {lookingUp ? 'Looking up...' : 'Look up card number'}
+            </button>
+            <p className="mt-1.5 text-xs text-stone-500">Fills in the name, set, rarity and current market price from the card catalog. Free, no assistant needed.</p>
+          </div>
+          {lookupNote && <p className="col-span-2 text-xs text-stone-600">{lookupNote}</p>}
+          {lookupHits && (
+            <div className="col-span-2">
+              <p className="text-xs text-stone-500 mb-2">That number is printed in {lookupHits.length} sets — which one is it?</p>
+              <div className="space-y-2">
+                {lookupHits.map((hit) => (
+                  <button type="button" key={hit.id} onClick={() => applyCatalog(hit)} className="w-full flex items-center justify-between gap-3 bg-white rounded-md border border-stone-200 px-3 py-2 text-left active:bg-stone-50">
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-stone-900 truncate">{hit.name}</span>
+                      <span className="block text-xs text-stone-500 truncate">{(hit.set || {}).name} · {(hit.set || {}).releaseDate} · {hit.rarity || 'Unknown rarity'}</span>
+                    </span>
+                    <span className="text-sm font-medium text-stone-900 shrink-0">{marketPrice(hit) ? money(marketPrice(hit)) : '—'}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <Field label="SKU"><input className={inputCls} value={form.sku} onChange={set('sku')} placeholder="Internal ID" /></Field>
           <div className="col-span-2"><Field label="Additional details"><textarea className={textareaCls} rows={2} value={form.details} onChange={set('details')} /></Field></div>
         </Section>
@@ -1948,182 +2009,6 @@ function EditForm({ card, isNew, initialPhotoFront, existingCards, onCancel, onS
             </div>
           </div>
         </div>
-      </div>
-    </div>
-  );
-}
-
-const AGENT_TOOLS = [
-  {
-    name: 'search_cards',
-    description: 'Search the inventory for cards matching a name, set, card number, inventory number, or status. Returns up to 15 matches with their id, name, set, status, and prices. Always use this first to find a card\'s id before calling any other tool.',
-    inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Search text, e.g. a card name, set name, or status' } }, required: ['query'] },
-  },
-  {
-    name: 'advance_status',
-    description: 'Move a card forward one step in its lifecycle: In inventory -> Listed -> Sold - not shipped -> Shipped -> Delivered -> Complete. Use this for requests like "list my Charizard" or "mark the Blastoise as shipped".',
-    inputSchema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
-  },
-  {
-    name: 'set_status',
-    description: 'Set a card status directly to any value, including "Cancelled / Delisted". Use this only when advance_status would not reach the target status directly (e.g. delisting, or moving backward).',
-    inputSchema: { type: 'object', properties: { card_id: { type: 'string' }, status: { type: 'string', enum: STATUS } }, required: ['card_id', 'status'] },
-  },
-  {
-    name: 'set_price',
-    description: "Update a card's buy-it-now price.",
-    inputSchema: { type: 'object', properties: { card_id: { type: 'string' }, price: { type: 'number' } }, required: ['card_id', 'price'] },
-  },
-  {
-    name: 'generate_listing',
-    description: "Write an eBay listing title and description for a card and save it to that card. Use this when asked to draft, write, or generate listing copy.",
-    inputSchema: { type: 'object', properties: { card_id: { type: 'string' } }, required: ['card_id'] },
-  },
-];
-
-function ChatPanel({ cards, stats, sets, onCardsChange }) {
-  const assistant = useAssistant();
-  const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState('');
-
-  function buildContext(cardList) {
-    const compact = cardList.map((c) => ({
-      id: c.id, inventoryNumber: c.inventoryNumber, name: c.name, set: c.setName, type: c.cardType, status: c.status,
-      cost: num(c.purchasePrice),
-      buyItNowPrice: c.buyItNowPrice ? num(c.buyItNowPrice) : null,
-      comparablePrice: c.comparablePrice ? num(c.comparablePrice) : null,
-      value: isPostSale(c.status) ? num(c.soldPrice) : (num(c.comparablePrice) || num(c.buyItNowPrice) || num(c.purchasePrice)),
-      purchaseDate: c.purchaseDate, soldDate: c.soldDate, condition: c.condition,
-      graded: c.graded ? `${c.gradingCompany || ''} ${c.grade || ''}`.trim() : null,
-    }));
-    return {
-      summary: {
-        totalCards: stats.count, totalCostBasis: stats.totalCost, totalEstValue: stats.totalValue,
-        unrealizedProfit: stats.profit, distinctSets: sets.length,
-        statusBreakdown: STATUS.reduce((a, s) => ({ ...a, [s]: cardList.filter((c) => c.status === s).length }), {}),
-      },
-      cards: compact,
-    };
-  }
-
-  async function executeTool(name, input, working) {
-    if (name === 'search_cards') {
-      const q = String(input.query || '').toLowerCase();
-      const matches = working.filter((c) => [c.name, c.setName, c.status, c.inventoryNumber, c.cardType].join(' ').toLowerCase().includes(q));
-      if (matches.length === 0) return { result: 'No cards found matching that search.', working };
-      return {
-        result: JSON.stringify(matches.slice(0, 15).map((c) => ({ id: c.id, name: c.name, set: c.setName, status: c.status, inventoryNumber: c.inventoryNumber, buyItNowPrice: c.buyItNowPrice, comparablePrice: c.comparablePrice }))),
-        working,
-      };
-    }
-    const idx = working.findIndex((c) => c.id === input.card_id);
-    if (idx === -1) return { result: `No card found with id "${input.card_id}". Use search_cards first to get the correct id.`, working };
-    const c = working[idx];
-
-    if (name === 'advance_status') {
-      const action = NEXT_ACTION[c.status];
-      if (!action) return { result: `${c.name} is already at "${c.status}" and has no further automatic stage.`, working };
-      const next = working.slice();
-      next[idx] = applyAdvance(c);
-      return { result: `Moved ${c.name} (${c.inventoryNumber}) from ${c.status} to ${action.next}.`, working: next };
-    }
-    if (name === 'set_status') {
-      if (!STATUS.includes(input.status)) return { result: `"${input.status}" is not a valid status.`, working };
-      const next = working.slice();
-      next[idx] = { ...c, status: input.status };
-      return { result: `Set ${c.name}'s status to ${input.status}.`, working: next };
-    }
-    if (name === 'set_price') {
-      const today = new Date().toISOString().slice(0, 10);
-      const next = working.slice();
-      next[idx] = { ...c, buyItNowPrice: String(input.price), priceHistory: [...(c.priceHistory || []), { date: today, price: String(input.price) }] };
-      return { result: `Updated ${c.name}'s buy-it-now price to ${money(input.price)}.`, working: next };
-    }
-    if (name === 'generate_listing') {
-      try {
-        const listing = await generateListingCopy(c);
-        const next = working.slice();
-        next[idx] = withAutoListingStatus({ ...c, listingTitle: listing.title, description: listing.description });
-        return { result: `Generated listing copy for ${c.name}. Title: "${listing.title}"`, working: next };
-      } catch (e) {
-        return { result: `Could not generate listing copy for ${c.name} right now.`, working };
-      }
-    }
-    return { result: `Unknown tool "${name}".`, working };
-  }
-
-  async function send() {
-    const question = input.trim();
-    if (!question) return;
-    setInput('');
-    setErr('');
-    const nextMessages = [...messages, { role: 'user', content: question }];
-    setMessages(nextMessages);
-    setLoading(true);
-
-    // The tools below mutate `working` as the agent goes; it is committed once
-    // the run finishes.
-    let working = cards.map((c) => ({ ...c }));
-    const runTool = (name) => async (input) => {
-      const outcome = await executeTool(name, input, working);
-      working = outcome.working;
-      return outcome.result;
-    };
-
-    try {
-      const { text, outOfSteps } = await runAgent({
-        system: `You are an operations agent for a collectibles resale business (Pokemon cards, comics, toys) that sells on eBay. You can both answer questions and take actions using the tools provided — moving cards through their lifecycle, updating prices, and generating listing copy. Always search_cards first to find the correct card id before acting on it, and if a search returns multiple plausible matches, ask the person which one they mean rather than guessing. Confirm what you did in plain language at the end. Be concise. Format currency clearly.\n\nInventory summary (JSON):\n${JSON.stringify(buildContext(working))}`,
-        messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
-        tools: AGENT_TOOLS.map((t) => ({ ...t, execute: runTool(t.name) })),
-        maxSteps: 6,
-      });
-
-      const reply = outOfSteps
-        ? "I made some updates but stopped after a few steps — let me know if you'd like me to keep going."
-        : text || "I couldn't find an answer to that.";
-      setMessages((prev) => [...prev, { role: 'assistant', content: reply }]);
-      onCardsChange(working);
-    } catch (e) {
-      setErr('Something went wrong reaching the assistant. Try again.');
-      setMessages((prev) => prev.slice(0, -1));
-      setInput(question);
-    }
-    setLoading(false);
-  }
-
-  const offline = Boolean(assistant) && !assistant.available;
-
-  return (
-    <div>
-      <div className="space-y-3 mb-4">
-        {messages.length === 0 && (
-          <div className="text-center py-10 px-4 bg-white rounded-lg border border-dashed border-stone-300">
-            {assistant && !assistant.available ? (
-              <>
-                <p className="text-sm font-medium text-stone-700 mb-1">The agent needs a server</p>
-                <p className="text-sm text-stone-500">Run the app locally, or open it as a Claude artifact, and it can answer questions and act on your inventory from here.</p>
-              </>
-            ) : (
-              <>
-                <p className="text-sm font-medium text-stone-700 mb-1">Ask, or ask it to act</p>
-                <p className="text-sm text-stone-500">Try "list my Charizard" or "mark the Blastoise as shipped" or "what's my most profitable set?"</p>
-              </>
-            )}
-          </div>
-        )}
-        {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${m.role === 'user' ? 'bg-stone-900 text-white' : 'bg-white border border-stone-200 text-stone-900'}`}>{m.content}</div>
-          </div>
-        ))}
-        {loading && <div className="flex justify-start"><div className="bg-white border border-stone-200 rounded-lg px-3 py-2 text-sm text-stone-400">Working…</div></div>}
-      </div>
-      {err && <div className="mb-3 px-3 py-2 rounded-md bg-red-50 text-red-700 text-xs border border-red-200">{err}</div>}
-      <div className="flex gap-2 sticky bottom-4">
-        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !loading && !offline) send(); }} disabled={offline} placeholder={offline ? 'Unavailable in this preview' : 'Ask a question, or ask it to do something...'} className="flex-1 h-10 px-3 rounded-md border border-stone-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:bg-stone-100 disabled:text-stone-400" />
-        <button onClick={send} disabled={loading || offline} className="h-10 w-10 shrink-0 rounded-md bg-stone-900 text-white flex items-center justify-center disabled:opacity-50"><Send size={16} /></button>
       </div>
     </div>
   );

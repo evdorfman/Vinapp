@@ -11,8 +11,7 @@
  *                to a same-origin proxy that attaches the API key server-side,
  *                and the web search tool is available.
  *
- * Callers use `complete()` for one-shot questions and `runAgent()` for the
- * tool-using chat agent, and branch on `capabilities()` where the difference
+ * Callers use `complete()` and branch on `capabilities()` where the difference
  * between backends is visible to the person using the app.
  */
 
@@ -55,19 +54,6 @@ function sampleBackend(sample, limits) {
       if (images && images.length) options.images = images.map(dataUrlToBlob);
       if (tier) options.modelTier = tier;
       const { text } = await sample(toSampleInput(system, messages), options);
-      return { text };
-    },
-
-    async runAgent({ system, messages, tools, signal }) {
-      const { text } = await sample(toSampleInput(system, messages), {
-        tools: tools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          inputSchema: t.inputSchema,
-          execute: t.execute,
-        })),
-        signal,
-      });
       return { text };
     },
   };
@@ -123,48 +109,6 @@ const proxyBackend = {
     const data = await postMessages(body);
     return { text: textOf(data.content) };
   },
-
-  async runAgent({ system, messages, tools, maxSteps = 6 }) {
-    const convo = messages.map((m) => ({ role: m.role, content: m.content }));
-    const definitions = tools.map((t) => ({
-      name: t.name,
-      description: t.description,
-      input_schema: t.inputSchema || { type: 'object', properties: {} },
-    }));
-
-    for (let step = 0; step < maxSteps; step += 1) {
-      const data = await postMessages({
-        model: MODEL,
-        max_tokens: 1200,
-        system,
-        tools: definitions,
-        messages: convo,
-      });
-      const content = data.content || [];
-      const toolUses = content.filter((b) => b.type === 'tool_use');
-      if (toolUses.length === 0) return { text: textOf(content) };
-
-      convo.push({ role: 'assistant', content });
-      const results = await Promise.all(
-        toolUses.map(async (use) => {
-          const tool = tools.find((t) => t.name === use.name);
-          let result;
-          try {
-            result = tool ? await tool.execute(use.input) : `Unknown tool "${use.name}".`;
-          } catch (err) {
-            result = `Error: ${err.message}`;
-          }
-          return {
-            type: 'tool_result',
-            tool_use_id: use.id,
-            content: typeof result === 'string' ? result : JSON.stringify(result),
-          };
-        }),
-      );
-      convo.push({ role: 'user', content: results });
-    }
-    return { text: '', outOfSteps: true };
-  },
 };
 
 /* ------------------------------------------------------------------ *
@@ -193,9 +137,6 @@ const unavailableBackend = {
   supportsWebSearch: false,
   supportsImages: false,
   async complete() {
-    throw new Error('The assistant is not available here.');
-  },
-  async runAgent() {
     throw new Error('The assistant is not available here.');
   },
 };
@@ -245,16 +186,6 @@ export async function capabilities() {
 export async function complete(request) {
   const backend = await resolveBackend();
   return backend.complete(request);
-}
-
-/**
- * A tool-using conversation. `tools` are `{name, description, inputSchema,
- * execute(input)}`; `execute` may mutate whatever the caller closes over and
- * should return a short string for Claude to read.
- */
-export async function runAgent(request) {
-  const backend = await resolveBackend();
-  return backend.runAgent(request);
 }
 
 /** Parses a JSON object or array out of a model response, tolerating code

@@ -16,8 +16,12 @@ comics, toys — from purchase through eBay listing to delivery.
   - generate an eBay title and description
   - look up comparable sold prices, with price history charts
   - fetch a set checklist with rough market prices
-  - a chat agent that can answer questions *and* act on inventory (advance
-    status, adjust prices, generate listings)
+- **Card catalog lookup** — no assistant needed. Type a printed card number
+  (`4/102`) and the free [pokemontcg.io](https://pokemontcg.io) catalog fills in
+  the name, set, rarity and the current TCGplayer market price. Where a number
+  is printed in more than one set, it asks which. Price checks use the catalog
+  first and only fall back to the assistant for cards it can't identify.
+  Pokemon only — comics and sealed product aren't in the catalog.
 
 ## Two ways to run it
 
@@ -28,7 +32,11 @@ server**, and picks its backends at runtime. Nothing else in the app changes.
 | --- | --- | --- |
 | Storage | `db` capability — server-side, follows the viewer between devices | IndexedDB — per-browser, lost with site data |
 | Assistant | `sample` capability — runs on the viewer's Claude account, no API key needed | API proxy using `ANTHROPIC_API_KEY` |
-| Web search | not available — comp prices and set checklists are model estimates | available, so those two do real lookups |
+| Web search | not available — set checklists fall back to model estimates | available |
+
+Card catalog lookups are a plain HTTPS call, so they work wherever the page can
+reach the internet — that means the local and Pages builds, but not inside an
+artifact, whose CSP blocks external requests.
 
 `src/lib/storage.js` and `src/lib/api.js` each hold both backends and choose
 between them by probing for `window.claude`.
