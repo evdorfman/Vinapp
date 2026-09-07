@@ -171,6 +171,21 @@ const proxyBackend = {
  * Backend selection
  * ------------------------------------------------------------------ */
 
+/**
+ * Is there a proxy behind us? The middleware answers a non-POST with 405, so
+ * anything but a 404 means it is there. On a static host — GitHub Pages, a
+ * plain file — nothing is, and the assistant features have to say so rather
+ * than fail one by one.
+ */
+async function proxyReachable() {
+  try {
+    const response = await fetch(ANTHROPIC_ENDPOINT, { method: 'GET' });
+    return response.status !== 404;
+  } catch (e) {
+    return false;
+  }
+}
+
 /** No assistant reachable — the app still keeps inventory, and features that
  *  need Claude report it rather than failing obscurely. */
 const unavailableBackend = {
@@ -203,7 +218,7 @@ function resolveBackend() {
       }
       return sampleBackend(sample, limits);
     }
-    return proxyBackend;
+    return (await proxyReachable()) ? proxyBackend : unavailableBackend;
   })();
   return backendPromise;
 }
@@ -214,6 +229,7 @@ export async function capabilities() {
   const backend = await resolveBackend();
   return {
     name: backend.name,
+    available: backend.name !== 'unavailable',
     supportsWebSearch: backend.supportsWebSearch,
     supportsImages: backend.supportsImages,
   };
