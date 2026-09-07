@@ -38,6 +38,12 @@ between them by probing for `window.claude`.
 Every push to `main` deploys to <https://evdorfman.github.io/Vinapp/> via
 `.github/workflows/pages.yml`.
 
+Pages has to be turned on once before the first deploy can succeed: **Settings
+-> Pages -> Build and deployment -> Source: GitHub Actions**. The workflow
+token cannot create the site on its own, and without it the deploy fails at
+`configure-pages` with "Resource not accessible by integration" and the site
+404s.
+
 Pages is a static host, so there is no proxy behind the app there. It detects
 that on load — the proxy answers a non-POST with 405, a static host 404s — and
 switches the assistant off with an explanation rather than letting each feature
