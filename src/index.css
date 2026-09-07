@@ -1,0 +1,17 @@
+@import 'tailwindcss';
+
+/* The app commits to a single light palette (stone + amber), so pin the
+   scheme rather than inheriting the viewer's. */
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  background-color: var(--color-stone-100);
+}
