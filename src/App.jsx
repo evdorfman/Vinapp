@@ -366,6 +366,7 @@ function Section({ title, children }) {
 }
 
 export default function App() {
+  const assistant = useAssistant();
   const [cards, setCards] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState('inventory');
@@ -615,6 +616,12 @@ export default function App() {
         </header>
 
         {error && <div className="mb-4 px-3 py-2 rounded-md bg-red-50 text-red-700 text-xs border border-red-200">{error}</div>}
+
+        {assistant && !assistant.available && (
+          <div className="mb-4 px-3 py-2 rounded-md bg-amber-50 text-amber-900 text-xs border border-amber-200">
+            This is a static preview, so the assistant is switched off — photo scanning, listing copy, price checks and the agent need a server. Everything else works, and your inventory is saved in this browser.
+          </div>
+        )}
 
         <div className="grid grid-cols-2 gap-3 mb-5">
           <StatCard label="Total cost basis" value={money(stats.totalCost)} />
@@ -1975,6 +1982,7 @@ const AGENT_TOOLS = [
 ];
 
 function ChatPanel({ cards, stats, sets, onCardsChange }) {
+  const assistant = useAssistant();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -2085,13 +2093,24 @@ function ChatPanel({ cards, stats, sets, onCardsChange }) {
     setLoading(false);
   }
 
+  const offline = Boolean(assistant) && !assistant.available;
+
   return (
     <div>
       <div className="space-y-3 mb-4">
         {messages.length === 0 && (
           <div className="text-center py-10 px-4 bg-white rounded-lg border border-dashed border-stone-300">
-            <p className="text-sm font-medium text-stone-700 mb-1">Ask, or ask it to act</p>
-            <p className="text-sm text-stone-500">Try "list my Charizard" or "mark the Blastoise as shipped" or "what's my most profitable set?"</p>
+            {assistant && !assistant.available ? (
+              <>
+                <p className="text-sm font-medium text-stone-700 mb-1">The agent needs a server</p>
+                <p className="text-sm text-stone-500">Run the app locally, or open it as a Claude artifact, and it can answer questions and act on your inventory from here.</p>
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-medium text-stone-700 mb-1">Ask, or ask it to act</p>
+                <p className="text-sm text-stone-500">Try "list my Charizard" or "mark the Blastoise as shipped" or "what's my most profitable set?"</p>
+              </>
+            )}
           </div>
         )}
         {messages.map((m, i) => (
@@ -2103,8 +2122,8 @@ function ChatPanel({ cards, stats, sets, onCardsChange }) {
       </div>
       {err && <div className="mb-3 px-3 py-2 rounded-md bg-red-50 text-red-700 text-xs border border-red-200">{err}</div>}
       <div className="flex gap-2 sticky bottom-4">
-        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !loading) send(); }} placeholder="Ask a question, or ask it to do something..." className="flex-1 h-10 px-3 rounded-md border border-stone-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
-        <button onClick={send} disabled={loading} className="h-10 w-10 shrink-0 rounded-md bg-stone-900 text-white flex items-center justify-center disabled:opacity-50"><Send size={16} /></button>
+        <input value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !loading && !offline) send(); }} disabled={offline} placeholder={offline ? 'Unavailable in this preview' : 'Ask a question, or ask it to do something...'} className="flex-1 h-10 px-3 rounded-md border border-stone-300 bg-white text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:bg-stone-100 disabled:text-stone-400" />
+        <button onClick={send} disabled={loading || offline} className="h-10 w-10 shrink-0 rounded-md bg-stone-900 text-white flex items-center justify-center disabled:opacity-50"><Send size={16} /></button>
       </div>
     </div>
   );

@@ -33,6 +33,17 @@ server**, and picks its backends at runtime. Nothing else in the app changes.
 `src/lib/storage.js` and `src/lib/api.js` each hold both backends and choose
 between them by probing for `window.claude`.
 
+### Published on GitHub Pages
+
+Every push to `main` deploys to <https://evdorfman.github.io/Vinapp/> via
+`.github/workflows/pages.yml`.
+
+Pages is a static host, so there is no proxy behind the app there. It detects
+that on load — the proxy answers a non-POST with 405, a static host 404s — and
+switches the assistant off with an explanation rather than letting each feature
+fail on its own. Inventory, photos, the set binder and the charts all work, and
+data is kept in that browser.
+
 ### Publishing the artifact
 
 ```bash
