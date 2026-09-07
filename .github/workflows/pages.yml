@@ -35,8 +35,11 @@ jobs:
 
       - run: npm run lint
 
-      # `enablement` turns Pages on for the repo the first time this runs, so
-      # there is no manual switch to flip. `base_path` is the project-pages
+      # Pages must already be on, with its source set to GitHub Actions
+      # (Settings -> Pages -> Build and deployment -> Source). The workflow
+      # token cannot create the site itself — it fails with "Resource not
+      # accessible by integration" — so `enablement` only covers the case
+      # where a token that can is in use. `base_path` is the project-pages
       # subdirectory the site is served from.
       - id: pages
         uses: actions/configure-pages@v5
